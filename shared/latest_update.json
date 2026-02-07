@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-02-07T06:00:00Z",
+  "asset": "FLR",
+  "price": 0.0123,
+  "state": "neutral",
+  "entropy": 0.42,
+  "kl": 0.08,
+  "tx_hash": null
+}

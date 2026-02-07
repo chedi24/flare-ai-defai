@@ -13,6 +13,11 @@ The module provides a ChatRouter class that integrates various services:
 """
 
 import json
+import re
+
+
+from pathlib import Path
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, HTTPException
@@ -27,13 +32,42 @@ from flare_ai_defai.prompts import PromptService, SemanticRouterResponse
 from flare_ai_defai.settings import settings
 
 # 🔹 NEW: Import risk analysis components
-from flare_ai_defai.crash_detection_system.integration import (
-    RiskAnalysisIntegration,
-    parse_user_intent_with_llm,
-)
+#from flare_ai_defai.crash_detection_system.integration import (
+#    RiskAnalysisIntegration,
+#    parse_user_intent_with_llm,
+#)
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
+
+def coerce_json(text: str) -> dict[str, Any]:
+    """
+    Accepts:
+      - raw JSON
+      - ```json ... ``` fenced JSON
+      - extra text around a JSON object (best-effort extraction)
+    """
+    t = text.strip()
+
+    # unwrap fenced code block
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", t, flags=re.S)
+    if m:
+        t = m.group(1).strip()
+
+    # best-effort: extract first {...}
+    if not (t.startswith("{") and t.endswith("}")):
+        m2 = re.search(r"(\{.*\})", t, flags=re.S)
+        if m2:
+            t = m2.group(1).strip()
+
+    return json.loads(t)
+
+
+def load_snapshot() -> dict[str, Any] | None:
+    p = Path(settings.latest_update_path).resolve()
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 class ChatMessage(BaseModel):
@@ -88,12 +122,12 @@ class ChatRouter:
         self.logger = logger.bind(router="chat")
         
         # 🔹 NEW: Initialize risk analysis integration
-        try:
-            self.risk_integration = RiskAnalysisIntegration()
-            self.logger.info("risk_engine_initialized")
-        except Exception as e:
-            self.logger.warning("risk_engine_init_failed", error=str(e))
-            self.risk_integration = None
+        #try:
+        #    self.risk_integration = RiskAnalysisIntegration()
+        #    self.logger.info("risk_engine_initialized")
+        #except Exception as e:
+        #    self.logger.warning("risk_engine_init_failed", error=str(e))
+        self.risk_integration = None
         
         self._setup_routes()
 
@@ -104,7 +138,7 @@ class ChatRouter:
         """
 
         @self._router.post("/")
-        async def chat(message: ChatMessage) -> dict[str, str]:  # pyright: ignore [reportUnusedFunction]
+        async def chat(message: ChatMessage): # -> dict[str, Any]:  # pyright: ignore [reportUnusedFunction]
             """
             Process incoming chat messages and route them to appropriate handlers.
 
@@ -153,10 +187,13 @@ class ChatRouter:
                         resp = f"The attestation failed with  error:\n{e.args[0]}"
                     self.attestation.attestation_requested = False
                     return {"response": resp}
+                
+                # Commented out to test
+                #
 
                 # 🔹 NEW: Check if this is a risk analysis request BEFORE semantic routing
-                if self._is_risk_query(message.message):
-                    return await self.handle_risk_analysis(message.message)
+                #if self._is_risk_query(message.message):
+                #    return await self.handle_risk_analysis(message.message)
 
                 route = await self.get_semantic_route(message.message)
                 return await self.route_message(route, message.message)
@@ -403,16 +440,117 @@ class ChatRouter:
         request_attestation_response = self.ai.generate(prompt=prompt)
         self.attestation.attestation_requested = True
         return {"response": request_attestation_response.text}
-
-    async def handle_conversation(self, message: str) -> dict[str, str]:
+    
+    async def handle_conversation(self, message: str) -> dict[str, Any]:
+    
         """
-        Handle general conversation messages.
-
-        Args:
-            message: Message to process
-
-        Returns:
-            dict[str, str]: Response from AI provider
+        Grounded conversation handler:
+        - Loads latest snapshot JSON (LATEST_UPDATE_PATH)
+        - Calls Gemini with snapshot + user message
+        - Returns structured JSON with:
+        * explicit not-financial-advice disclaimer
+        * echoed snapshot figures (authoritative)
+        * educational suggestions ("what to watch", "risk flags", etc.)
         """
-        response = self.ai.send_message(message)
-        return {"response": response.text}
+        snapshot = load_snapshot()
+
+        grounded_prompt = f"""
+        SYSTEM:
+        You are an educational market-risk assistant for a demo DeFAI app.
+        You are NOT a financial advisor. Do not provide personalized financial advice.
+        Do NOT tell the user to buy/sell/hold or give specific trade instructions.
+        You MAY provide general, educational "things to consider" based on the snapshot.
+
+        CRITICAL RULES:
+        - You MUST reference and quote snapshot figures exactly as provided.
+        - If a value is missing in the snapshot, output null and say "not provided" (do not invent).
+        - Whenever you mention price/entropy/kl, include the numeric value.
+        - Output MUST be valid JSON ONLY (no markdown, no extra text).
+
+        SNAPSHOT_JSON:
+        {json.dumps(snapshot, indent=2) if snapshot is not None else "null"}
+        
+        USER_MESSAGE:
+        {message}
+
+        OUTPUT_JSON_SCHEMA (follow exactly):
+        {{
+        "disclaimer": "string",
+        "snapshot_echo": {{
+        "timestamp": "string or null",
+        "asset": "string or null",
+        "price": "number or null",
+        "state": "string or null",
+        "entropy": "number or null",
+        "kl": "number or null",
+        "tx_hash": "string or null"
+        }},
+        "interpretation": {{
+        "what_it_suggests": ["string"],
+        "what_to_watch_next": ["string"],
+        "risk_flags": ["string"]
+        }},
+        "suggested_checks": ["string"],
+        "questions_for_user": ["string"]
+        }}
+        """.strip()
+
+        resp = self.ai.send_message(grounded_prompt)
+
+        try:
+            model_json = coerce_json(resp.text)
+
+            # Make a nice UI string (CRA chat can display this)
+            interp = model_json.get("interpretation") or {}
+            what = interp.get("what_it_suggests") or []
+            watch = interp.get("what_to_watch_next") or []
+            flags = interp.get("risk_flags") or []
+            checks = model_json.get("suggested_checks") or []
+            qs = model_json.get("questions_for_user") or []
+
+            def bullets(items):
+                return "\n".join([f"- {x}" for x in items]) if items else "- (none)"
+
+            # Snapshot echo (safe, model already echoed)
+            se = model_json.get("snapshot_echo") or {}
+            snap_line = (
+                f"Snapshot: asset={se.get('asset')}, price={se.get('price')}, "
+                f"state={se.get('state')}, entropy={se.get('entropy')}, kl={se.get('kl')}, "
+                f"timestamp={se.get('timestamp')}"
+            )
+
+            response_text = "\n".join([
+                model_json.get("disclaimer", "").strip(),
+                "",
+                snap_line,
+                "",
+                "What it suggests:",
+                bullets(what),
+                "",
+                "What to watch next:",
+                bullets(watch),
+                "",
+                "Risk flags:",
+                bullets(flags),
+                "",
+                "Suggested checks:",
+                bullets(checks),
+                "",
+                "Questions for you:",
+                bullets(qs),
+            ]).strip()
+
+            return {
+                "response": response_text,
+                "model": model_json,
+                "snapshot": snapshot,
+            }
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Model returned non-JSON. First 500 chars:\n{resp.text[:500]}",
+            ) from e
+
+
+

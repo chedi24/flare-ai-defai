@@ -11,6 +11,7 @@ Dependencies:
     - CORS middleware for cross-origin resource sharing
     - Custom providers for AI, blockchain, and attestation services
 """
+from flare_ai_defai.api.routes.snapshot import router as snapshot_router
 
 import structlog
 from fastapi import FastAPI
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
         title="AI Agent API", version=settings.api_version, redirect_slashes=False
     )
 
+    
     # Configure CORS middleware with settings from configuration
     app.add_middleware(
         CORSMiddleware,
@@ -104,6 +106,10 @@ def create_app() -> FastAPI:
 
     # Register chat routes with API
     app.include_router(chat.router, prefix="/api/routes/chat", tags=["chat"])
+    
+    # Register snapshot routes
+    app.include_router(snapshot_router, prefix="/api", tags=["snapshot"])
+
     return app
 
 

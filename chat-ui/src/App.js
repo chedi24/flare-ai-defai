@@ -3,7 +3,7 @@ import { Send } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import './index.css';
 
-const BACKEND_ROUTE = 'api/routes/chat/'
+const BACKEND_ROUTE = '/api/routes/chat/'
 
 const ChatInterface = () => {
   const [messages, setMessages] = useState([
@@ -41,14 +41,23 @@ const ChatInterface = () => {
       }
 
       const data = await response.json();
-      
+
+      // Safely extract text from different backend response shapes
+      const textOut =
+        (typeof data?.response === 'string' && data.response) ||
+        (typeof data?.detail === 'string' && data.detail) ||
+        (typeof data?.message === 'string' && data.message) ||
+        (data?.model ? JSON.stringify(data.model, null, 2) : null) ||
+        'Sorry, I got an unexpected response from the server.';
+
       // Check if response contains a transaction preview
-      if (data.response.includes('Transaction Preview:')) {
+      if (textOut.includes('Transaction Preview:')) {
         setAwaitingConfirmation(true);
         setPendingTransaction(text);
       }
-      
-      return data.response;
+
+      return textOut;
+
     } catch (error) {
       console.error('Error:', error);
       return 'Sorry, there was an error processing your request. Please try again.';
