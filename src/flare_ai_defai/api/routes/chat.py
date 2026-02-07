@@ -40,6 +40,25 @@ from flare_ai_defai.settings import settings
 logger = structlog.get_logger(__name__)
 router = APIRouter()
 
+def wants_analysis(message: str) -> bool:
+    """
+    Only enter structured snapshot analysis when explicitly requested.
+    Default is normal chat.
+    """
+    msg = message.lower()
+    triggers = [
+        "snapshot",
+        "summaris",   # summarize / summarise
+        "analy",      # analyze / analysis
+        "risk",
+        "entropy",
+        "kl",
+        "what to watch",
+        "state",
+    ]
+    return any(t in msg for t in triggers)
+
+
 def coerce_json(text: str) -> dict[str, Any]:
     """
     Accepts:
@@ -445,13 +464,16 @@ class ChatRouter:
     
         """
         Grounded conversation handler:
-        - Loads latest snapshot JSON (LATEST_UPDATE_PATH)
-        - Calls Gemini with snapshot + user message
-        - Returns structured JSON with:
-        * explicit not-financial-advice disclaimer
-        * echoed snapshot figures (authoritative)
-        * educational suggestions ("what to watch", "risk flags", etc.)
+        - Default: normal Gemini chat
+        - If user asks for analysis: load snapshot + enforce JSON schema + format nicely
         """
+
+        # 1) Default: behave like normal Gemini chat
+        if not wants_analysis(message):
+            resp = self.ai.send_message(message)
+            return {"response": resp.text}
+
+        # 2) Analysis mode only when asked
         snapshot = load_snapshot()
 
         grounded_prompt = f"""
@@ -496,6 +518,12 @@ class ChatRouter:
         """.strip()
 
         resp = self.ai.send_message(grounded_prompt)
+
+        # Default: behave like normal Gemini chat
+        if not wants_analysis(message):
+            resp = self.ai.send_message(message)
+        return {"response": resp.text}
+
 
         try:
             model_json = coerce_json(resp.text)
